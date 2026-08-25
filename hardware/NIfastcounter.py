@@ -401,7 +401,7 @@ class NIFastCounter(Base, SlowCounterInterface, FastCounterInterface):
         -1 = error state
         """
         if self.useNIcard or self.useNIcardDI == 1:
-            return 1
+            return 2 if self.meas_run else 1
         else:
             return -1
 
@@ -599,7 +599,6 @@ class NIFastCounter(Base, SlowCounterInterface, FastCounterInterface):
                 except:
                     print('measurement is not stopped')
                 return
-
 
 
 

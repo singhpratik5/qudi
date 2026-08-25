@@ -2674,7 +2674,11 @@ class PulsedMeasurementGui(GUIBase):
             num_of_ticks //= 2
         
         if settings_dict['log_spacing']:
-            controlled_variable = np.geomspace(vals_start, vals_stop, num_of_ticks)
+            if vals_start > 0 and vals_stop > 0:
+                controlled_variable = np.geomspace(vals_start, vals_stop, num_of_ticks)
+            else:
+                self.log.warning('Log spacing requires positive start/stop values. Falling back to linear spacing.')
+                controlled_variable = np.linspace(vals_start, vals_stop, num_of_ticks)
         else:
             controlled_variable = np.linspace(vals_start, vals_stop, num_of_ticks)
         settings_dict['controlled_variable'] = controlled_variable
