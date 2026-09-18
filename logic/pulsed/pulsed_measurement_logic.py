@@ -68,6 +68,7 @@ class PulsedMeasurementLogic(GenericLogic):
     __fast_counter_record_length = StatusVar(default=3.0e-6)
     __fast_counter_binwidth = StatusVar(default=1.0e-9)
     __fast_counter_gates = StatusVar(default=0)
+    __fast_counter_stop_sweep = StatusVar(default=0) #Pratik: stop sweep
 
     # measurement timer settings
     __timer_interval = StatusVar(default=5)
@@ -126,6 +127,7 @@ class PulsedMeasurementLogic(GenericLogic):
         self.__start_time = 0
         self.__elapsed_time = 0
         self.__elapsed_sweeps = 0
+        self.__stop_requested = False #JSS: stop sweep
 
         # threading
         self._threadlock = Mutex()
@@ -159,7 +161,6 @@ class PulsedMeasurementLogic(GenericLogic):
         # Create an instance of PulseExtractor
         self._pulseextractor = PulseExtractor(pulsedmeasurementlogic=self)
         self._pulseanalyzer = PulseAnalyzer(pulsedmeasurementlogic=self)
-        #print('PML/onActivate/162')
 
         # QTimer must be created here instead of __init__ because otherwise the timer will not run
         # in this logic's thread but in the manager instead.
@@ -182,32 +183,29 @@ class PulsedMeasurementLogic(GenericLogic):
 
         # Check and configure fast counter
         binning_constraints = self.fastcounter().get_constraints()['hardware_binwidth_list']
-        #print('PML/onActivate/185')
         if self.__fast_counter_binwidth not in binning_constraints:
             self.__fast_counter_binwidth = binning_constraints[0]
-        #print('PML/onActivate/187')
         if self.__fast_counter_record_length <= 0:
             self.__fast_counter_record_length = 3e-6
         self.fast_counter_off()
-        #print('PML/onActivate/190')
         # Set default number of gates to a reasonable number for gated counters (>0 if gated)
         if self.fastcounter().is_gated() and self.__fast_counter_gates < 1:
             self.__fast_counter_gates = max(1, self._number_of_lasers)
         self.set_fast_counter_settings()
-       # print('PML/onActivate/194')
+
         # Check and configure external microwave
         if self.__use_ext_microwave:
             self.microwave_off()
             self.set_microwave_settings(frequency=self.__microwave_freq,
                                         power=self.__microwave_power,
                                         use_ext_microwave=True)
-        #print('PML/onActivate/201')
+
         # Convert controlled variable list into numpy.ndarray
         self._controlled_variable = np.array(self._controlled_variable, dtype=float)
-       # print('PML/onActivate/204')
+
         # initialize arrays for the measurement data
         self._initialize_data_arrays()
-        #print('PML/onActivate/207')
+
         # recalled saved raw data dict key
         self._recalled_raw_data_tag = None
 
@@ -243,6 +241,7 @@ class PulsedMeasurementLogic(GenericLogic):
         settings_dict['bin_width'] = float(self.__fast_counter_binwidth)
         settings_dict['record_length'] = float(self.__fast_counter_record_length)
         settings_dict['number_of_gates'] = int(self.__fast_counter_gates)
+        settings_dict['stop_sweep'] = int(self.__fast_counter_stop_sweep) #Pratik: stop sweep
         settings_dict['is_gated'] = bool(self.fastcounter().is_gated())
         return settings_dict
 
@@ -269,10 +268,7 @@ class PulsedMeasurementLogic(GenericLogic):
         @return:
         """
         # Check if fast counter is running and do nothing if that is the case
-        print(self.fastcounter().get_status())
         counter_status = self.fastcounter().get_status()
-        #print(counter_status)
-        #print(kwargs)
         if not counter_status >= 2 and not counter_status < 0:
             # Determine complete settings dictionary
             if not isinstance(settings_dict, dict):
@@ -290,13 +286,18 @@ class PulsedMeasurementLogic(GenericLogic):
                     self.__fast_counter_gates = int(settings_dict['number_of_gates'])
                 else:
                     self.__fast_counter_gates = 0
-            #print('PML/set_fast_counter_settings/292')
+            if 'stop_sweep' in settings_dict: #Pratik: stop sweep
+                self.__fast_counter_stop_sweep = int(settings_dict['stop_sweep'])
+
             # Apply the settings to hardware
             self.__fast_counter_binwidth, \
             self.__fast_counter_record_length, \
-            self.__fast_counter_gates = self.fastcounter().configure(self.__fast_counter_binwidth,
-                                                                     self.__fast_counter_record_length,
-                                                                     self.__fast_counter_gates)
+            self.__fast_counter_gates, \
+            self.__fast_counter_stop_sweep = self.fastcounter().configure( #Pratik: stop sweep
+                                                self.__fast_counter_binwidth,
+                                                self.__fast_counter_record_length,
+                                                self.__fast_counter_gates,
+                                                self.__fast_counter_stop_sweep) #Pratik: stop sweep
         else:
             self.log.warning('Fast counter is not idle (status: {0}).\n'
                              'Unable to apply new settings.'.format(counter_status))
@@ -758,6 +759,7 @@ class PulsedMeasurementLogic(GenericLogic):
     def start_pulsed_measurement(self, stashed_raw_data_tag=''):
         """Start the analysis loop."""
         self.sigMeasurementStatusUpdated.emit(True, False)
+        self.__stop_requested = False  # JSS: stop sweep
 
         # Check if measurement settings need to be invoked
         if self._invoke_settings_from_sequence:
@@ -824,10 +826,10 @@ class PulsedMeasurementLogic(GenericLogic):
         Stop the measurement
         """
         # Get raw data and analyze it a last time just before stopping the measurement.
-        try:
-            self._pulsed_analysis_loop()
-        except:
-            pass
+        #try:  #JSS: mudiadhu poda
+        #    self._pulsed_analysis_loop()
+        #except:
+        #    pass
 
         with self._threadlock:
             if self.module_state() == 'locked':
@@ -1152,6 +1154,22 @@ class PulsedMeasurementLogic(GenericLogic):
             self.sigTimerUpdated.emit(self.__elapsed_time, self.__elapsed_sweeps,
                                       self.__timer_interval)
             self.sigMeasurementDataUpdated.emit()
+
+            #JSS: stop sweep
+            print("stop_sweep", self.__fast_counter_stop_sweep,
+                  "elapsed_sweeps", self.elapsed_sweeps)
+
+            if (self.__fast_counter_stop_sweep > 0
+                    and self.elapsed_sweeps >= self.__fast_counter_stop_sweep
+                    and not self.__stop_requested):
+                self.__stop_requested = True
+
+                print("Automatic stop requested")
+                def delayed_stop():
+                    self.stop_pulsed_measurement()
+                QtCore.QTimer.singleShot(0, delayed_stop)
+
+
             return
 
     def _extract_laser_pulses(self):
@@ -1160,13 +1178,10 @@ class PulsedMeasurementLogic(GenericLogic):
         self.raw_data = fc_data
         self.__elapsed_sweeps = info_dict['elapsed_sweeps']
         self.__elapsed_time = info_dict['elapsed_time']
-        #print('elpased sweep and time was read')
 
         # extract laser pulses from raw data
         return_dict = self._pulseextractor.extract_laser_pulses(self.raw_data)
         self.laser_data = return_dict['laser_counts_arr']
-        #print('self.laser_data')
-        #print(self.laser_data)
         return
 
     def _analyze_laser_pulses(self):
@@ -1189,8 +1204,6 @@ class PulsedMeasurementLogic(GenericLogic):
         """
         # get raw data from fast counter
         fc_data = self.fastcounter().get_data_trace()
-        #print('pulsed/getrawdata/fcdata')
-        #print(fc_data)
         if type(fc_data) == tuple and len(fc_data) == 2:  # if the hardware implement the new version of the interface
             fc_data, info_dict = fc_data
         else:
@@ -1226,17 +1239,15 @@ class PulsedMeasurementLogic(GenericLogic):
         elif not fc_data.any():
             self.log.warning('Only zeros received from fast counter!')
             fc_data = np.zeros(fc_data.shape, dtype='int64')
-        #print('pulseLogic/fc_data')
-        #print(fc_data)
+
         return fc_data, {'elapsed_sweeps': elapsed_sweeps, 'elapsed_time': elapsed_time}
 
     def _initialize_data_arrays(self):
         """
-        Initializing the signal, error, laser and raw data arrays. this is started as soon as the measureent start
+        Initializing the signal, error, laser and raw data arrays.
         """
         # Determine signal array dimensions
         signal_dim = 3 if self._alternating else 2
-        #print('pulsedMlogic\Measurement Initilized for array data')
 
         self.signal_data = np.zeros((signal_dim, len(self._controlled_variable)), dtype=float)
         self.signal_data[0] = self._controlled_variable
@@ -1255,9 +1266,8 @@ class PulsedMeasurementLogic(GenericLogic):
             self.raw_data = np.zeros((self._number_of_lasers, number_of_bins), dtype='int64')
         else:
             self.raw_data = np.zeros(number_of_bins, dtype='int64')
-            #print(number_of_bins)
-        self.sigMeasurementDataUpdated.emit()
 
+        self.sigMeasurementDataUpdated.emit()
         return
 
     # FIXME: Revise everything below
@@ -1400,7 +1410,7 @@ class PulsedMeasurementLogic(GenericLogic):
                                  label='data trace 2')
 
                 # Do not include fit curve if there is no fit calculated.
-                if self.signal_fit_data.size != 0 and np.sum(self.signal_fit_data[1]) > 0:
+                if self.signal_fit_data.size != 0 and np.sum(np.abs(self.signal_fit_data[1])) > 0:
                     x_axis_fit_scaled = self.signal_fit_data[0] / scaled_float.scale_val
                     ax1.plot(x_axis_fit_scaled, self.signal_fit_data[1],
                              color=colors[2], marker='None', linewidth=1.5,
@@ -1503,7 +1513,8 @@ class PulsedMeasurementLogic(GenericLogic):
                     ax2.legend(bbox_to_anchor=(0., 1.02, 1., .102), loc=3, ncol=2,
                                mode="expand", borderaxespad=0.)
 
-                    if self.signal_fit_alt_data.size != 0 and np.sum(self.signal_fit_alt_data[1]) > 0:
+                    if (self.signal_fit_alt_data.size != 0
+                            and np.sum(np.abs(self.signal_fit_alt_data[1])) > 0):
                         x_axis_fit_scaled = self.signal_fit_alt_data[0] / scaled_float.scale_val
                         ax2.plot(x_axis_fit_scaled, self.signal_fit_alt_data[1],
                                  color=colors[2], marker='None', linewidth=1.5,
@@ -1585,8 +1596,7 @@ class PulsedMeasurementLogic(GenericLogic):
 
         # prepare the data in a dict or in an OrderedDict:
         data = OrderedDict()
-       #raw_trace = self.raw_data.astype('int64')
-        raw_trace = self.raw_data
+        raw_trace = self.raw_data.astype('int64')
         data['Signal(counts)'] = raw_trace.transpose()
         # write the parameters:
         parameters = OrderedDict()
@@ -1596,9 +1606,11 @@ class PulsedMeasurementLogic(GenericLogic):
         parameters['Number of laser pulses'] = self._number_of_lasers
         parameters['alternating'] = self._alternating
         parameters['Controlled variable'] = list(self.signal_data[0])
+        parameters['Approx. measurement time (s)'] = self.__elapsed_time
+        parameters['Measurement sweeps'] = self.__elapsed_sweeps
 
         self.savelogic().save_data(data, timestamp=timestamp,
-                                   parameters=parameters, fmt='%.7f',
+                                   parameters=parameters, fmt='%d',
                                    filepath=filepath, filelabel=filelabel,
                                    filetype=self._raw_data_save_type,
                                    delimiter='\t')
